@@ -2,9 +2,17 @@ use crate::{buffer_is_full, AudioClip, Frame, Renderer};
 use anyhow::{Context, Result};
 use ringbuf::{HeapConsumer, HeapProducer, HeapRb};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc, Weak,
 };
+use std::time::SystemTime;
+
+fn get_system_time() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
+}
 
 #[derive(Debug, Clone)]
 pub struct MusicParams {
@@ -26,12 +34,16 @@ impl Default for MusicParams {
 
 struct SharedState {
     position: AtomicU32, // float in bits
+    position_update_time: AtomicU64,
+    playback_rate: AtomicU32, // float in bits
     paused: AtomicBool,
 }
 impl Default for SharedState {
     fn default() -> Self {
         Self {
             position: AtomicU32::default(),
+            position_update_time: AtomicU64::new(get_system_time()),
+            playback_rate: AtomicU32::new((1.0 as f32).to_bits()),
             paused: AtomicBool::new(true),
         }
     }
@@ -196,6 +208,12 @@ impl Renderer for MusicRenderer {
                 state
                     .position
                     .store(self.position(delta as f32).to_bits(), Ordering::SeqCst);
+                state
+                    .position_update_time
+                    .store(get_system_time(), Ordering::SeqCst);
+                state
+                    .playback_rate
+                    .store(self.settings.playback_rate.to_bits(), Ordering::SeqCst);
             }
         }
     }
@@ -219,6 +237,12 @@ impl Renderer for MusicRenderer {
                 state
                     .position
                     .store(self.position(delta as f32).to_bits(), Ordering::SeqCst);
+                state
+                    .position_update_time
+                    .store(get_system_time(), Ordering::SeqCst);
+                state
+                    .playback_rate
+                    .store(self.settings.playback_rate.to_bits(), Ordering::SeqCst);
             }
         }
     }
@@ -303,6 +327,20 @@ impl Music {
     }
 
     pub fn position(&self) -> f32 {
-        f32::from_bits(self.arc.position.load(Ordering::SeqCst))
+        let mut pos = f32::from_bits(self.arc.position.load(Ordering::SeqCst));
+
+        if self.arc.paused.load(Ordering::SeqCst) {
+            return pos;
+        }
+
+        let now_ns = get_system_time();
+        let last_ns = self.arc.position_update_time.load(Ordering::SeqCst);
+
+        let elapsed_secs = now_ns.saturating_sub(last_ns) as f32 / 1_000_000_000.0;
+        let rate = f32::from_bits(self.arc.playback_rate.load(Ordering::SeqCst));
+
+        pos += elapsed_secs * rate;
+
+        return pos;
     }
 }
